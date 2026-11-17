@@ -224,38 +224,46 @@ function startGuest(){
   const q = $("#q"), results = $("#results"), spin = $("#spin"), hint = $("#hint");
   let timer, seq = 0, picked = null;
 
-  function itunes(term){
-    // JSONP keeps this working everywhere (Apple's search API, no key needed).
+  function jsonp(url, ms){
     return new Promise((resolve, reject) => {
-      const cb = "it_cb_" + (++seq) + "_" + Date.now();
+      const cb = "jp_cb_" + (++seq) + "_" + Date.now();
       const s = document.createElement("script");
       const done = () => { delete window[cb]; s.remove(); };
-      window[cb] = data => { done(); resolve(data.results || []); };
+      window[cb] = data => { done(); resolve(data); };
       s.onerror = () => { done(); reject(); };
-      s.src = "https://itunes.apple.com/search?media=music&entity=song&limit=8&country=US&term=" +
-              encodeURIComponent(term) + "&callback=" + cb;
+      s.src = url + (url.includes("?") ? "&" : "?") + "callback=" + cb;
       document.body.appendChild(s);
-      setTimeout(() => { if (window[cb]) { done(); reject(); } }, 8000);
+      setTimeout(() => { if (window[cb]) { window[cb] = () => {}; s.remove(); reject(); } }, ms);
     });
+  }
+  // Deezer first (works on iPhone + Android, generous limits), Apple Music search as backup.
+  async function searchSongs(term){
+    try{
+      const d = await jsonp("https://api.deezer.com/search?limit=10&output=jsonp&q=" + encodeURIComponent(term), 4000);
+      const list = (d && d.data || []).map(r => ({title: r.title_short || r.title, artist: r.artist && r.artist.name || "",
+                    art: r.album && (r.album.cover_medium || r.album.cover_small) || ""}));
+      if (list.length) return list;
+    }catch{}
+    const d = await jsonp("https://itunes.apple.com/search?media=music&entity=song&limit=10&country=US&term=" + encodeURIComponent(term), 5000);
+    return (d && d.results || []).map(r => ({title: r.trackName, artist: r.artistName,
+              art: (r.artworkUrl100 || "").replace("100x100","200x200")}));
   }
 
   function render(list, term){
     const seen = new Set();
-    const songs = list.filter(r => { const k=(r.trackName+"|"+r.artistName).toLowerCase(); if(seen.has(k)) return false; seen.add(k); return true; });
+    const songs = list.filter(r => { const k=(r.title+"|"+r.artist).toLowerCase(); if(seen.has(k)) return false; seen.add(k); return true; }).slice(0, 8);
     results.innerHTML = songs.map((r,i) => `
       <button class="row" data-i="${i}">
-        <div class="art" style="background-image:url('${esc(r.artworkUrl100||"")}')"></div>
-        <div class="meta"><div class="t">${esc(r.trackName)}</div><div class="a">${esc(r.artistName)}</div></div>
+        <div class="art" style="background-image:url('${esc(r.art)}')"></div>
+        <div class="meta"><div class="t">${esc(r.title)}</div><div class="a">${esc(r.artist)}</div></div>
       </button>`).join("") + `
       <button class="row custom" data-custom="1">
         <div class="art">✍️</div>
         <div class="meta"><div class="t">Request “${esc(term)}”</div><div class="a">Can't find it? Send exactly what you typed</div></div>
       </button>`;
     results.querySelectorAll(".row").forEach(b => b.onclick = () => {
-      if (b.dataset.custom) open({title: term, artist: "", art: "", trackId: null});
-      else { const r = songs[+b.dataset.i];
-        open({title: r.trackName, artist: r.artistName, trackId: r.trackId,
-              art: (r.artworkUrl100||"").replace("100x100","200x200")}); }
+      if (b.dataset.custom) open({title: term, artist: "", art: ""});
+      else open(songs[+b.dataset.i]);
     });
   }
 
@@ -267,7 +275,7 @@ function startGuest(){
     spin.classList.remove("hidden");
     const mySeq = ++seq;
     timer = setTimeout(async () => {
-      try { const list = await itunes(term); if (q.value.trim() === term) render(list, term); }
+      try { const list = await searchSongs(term); if (q.value.trim() === term) render(list, term); }
       catch { if (q.value.trim() === term) render([], term); }
       finally { spin.classList.add("hidden"); }
     }, 220);
@@ -294,7 +302,7 @@ function startGuest(){
     if (wait > 0){ err.textContent = `Hang on ${wait}s before sending another 🙂`; err.classList.remove("hidden"); return; }
     const btn = $("#send"); btn.disabled = true; btn.textContent = "Sending…";
     try{
-      await publish({t:"req", title:picked.title, artist:picked.artist, art:picked.art, trackId:picked.trackId});
+      await publish({t:"req", title:picked.title, artist:picked.artist, art:picked.art});
       try{ localStorage.setItem("djreq_last", Date.now()); }catch{}
       close();
       $("#searchArea").classList.add("hidden");
@@ -322,7 +330,7 @@ function startDJ(){
   const groups = new Map(); // key -> {key,title,artist,art,reqs:[ts],playedAt,delAt}
   let clearedAt = 0, tab = "queue", sort = "new", sound = false, ready = false, freshKeys = new Set();
 
-  const keyOf = m => m.trackId ? "id:"+m.trackId : "txt:"+(m.title+"|"+(m.artist||"")).toLowerCase().replace(/\s+/g," ").trim();
+  const keyOf = m => (String(m.title||"").replace(/\s*[\(\[].*?[\)\]]\s*/g," ")+"|"+(m.artist||"")).toLowerCase().replace(/[^a-z0-9|]+/g," ").replace(/\s+/g," ").trim();
 
   function apply(evt, ts){
     if (evt.t === "clear"){ clearedAt = Math.max(clearedAt, ts); return; }
